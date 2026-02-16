@@ -21,23 +21,25 @@ try:
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     # Test connection
     client.admin.command('ping')
+    db = client['gayathri_smart_speak']
+    users_collection = db['users']
+    teachers_collection = db['teachers']
+    conversations_collection = db['conversations']
     print("✅ MongoDB connected successfully!")
 except Exception as e:
     print(f"❌ MongoDB connection failed: {e}")
     print("App will continue but data will NOT persist!")
     client = None
-
-# Database and collections
-db = client['gayathri_smart_speak'] if client else None
-users_collection = db['users'] if db else None
-teachers_collection = db['teachers'] if db else None
-conversations_collection = db['conversations'] if db else None
+    db = None
+    users_collection = None
+    teachers_collection = None
+    conversations_collection = None
 
 # ==================== USER FUNCTIONS ====================
 
 def create_user(user_id, username, password, user_type='student'):
     """Create a new user in the database"""
-    if not users_collection:
+    if users_collection is None:
         return None
     
     try:
@@ -66,7 +68,7 @@ def create_user(user_id, username, password, user_type='student'):
 
 def get_user_by_username(username):
     """Get user by username"""
-    if not users_collection:
+    if users_collection is None:
         return None
     
     try:
@@ -77,7 +79,7 @@ def get_user_by_username(username):
 
 def get_user_by_id(user_id):
     """Get user by ID"""
-    if not users_collection:
+    if users_collection is None:
         return None
     
     try:
@@ -88,7 +90,7 @@ def get_user_by_id(user_id):
 
 def update_user(user_id, update_data):
     """Update user data"""
-    if not users_collection:
+    if users_collection is None:
         return False
     
     try:
@@ -106,7 +108,7 @@ def update_user(user_id, update_data):
 
 def update_user_xp(user_id, xp, level, stars=None):
     """Update user XP, level, and optionally stars"""
-    if not users_collection:
+    if users_collection is None:
         return False
     
     try:
@@ -130,7 +132,7 @@ def update_user_xp(user_id, xp, level, stars=None):
 
 def update_user_mode_stats(user_id, mode, stars_earned):
     """Update user mode-specific statistics"""
-    if not users_collection:
+    if users_collection is None:
         return False
     
     try:
@@ -154,7 +156,7 @@ def update_user_mode_stats(user_id, mode, stars_earned):
 
 def get_all_users():
     """Get all users (for teacher dashboard)"""
-    if not users_collection:
+    if users_collection is None:
         return []
     
     try:
@@ -167,7 +169,7 @@ def get_all_users():
 
 def create_teacher(teacher_id, username, password):
     """Create a new teacher in the database"""
-    if not teachers_collection:
+    if teachers_collection is None:
         return None
     
     try:
@@ -190,7 +192,7 @@ def create_teacher(teacher_id, username, password):
 
 def get_teacher_by_username(username):
     """Get teacher by username"""
-    if not teachers_collection:
+    if teachers_collection is None:
         return None
     
     try:
@@ -201,7 +203,7 @@ def get_teacher_by_username(username):
 
 def get_teacher_by_id(teacher_id):
     """Get teacher by ID"""
-    if not teachers_collection:
+    if teachers_collection is None:
         return None
     
     try:
@@ -212,7 +214,7 @@ def get_teacher_by_id(teacher_id):
 
 def update_teacher(teacher_id, update_data):
     """Update teacher data"""
-    if not teachers_collection:
+    if teachers_collection is None:
         return False
     
     try:
@@ -231,7 +233,7 @@ def update_teacher(teacher_id, update_data):
 
 def save_conversation(user_id, mode, conversation_text):
     """Save conversation with message limit"""
-    if not conversations_collection:
+    if conversations_collection is None:
         return False
     
     try:
@@ -261,7 +263,7 @@ def save_conversation(user_id, mode, conversation_text):
 
 def get_conversation(user_id, mode):
     """Get conversation for user and mode"""
-    if not conversations_collection:
+    if conversations_collection is None:
         return ''
     
     try:
@@ -275,7 +277,7 @@ def get_conversation(user_id, mode):
 
 def delete_conversation(user_id, mode):
     """Delete conversation history"""
-    if not conversations_collection:
+    if conversations_collection is None:
         return False
     
     try:
@@ -290,7 +292,7 @@ def delete_conversation(user_id, mode):
 
 def get_all_conversations(user_id):
     """Get all conversations for a user"""
-    if not conversations_collection:
+    if conversations_collection is None:
         return {}
     
     try:
@@ -310,14 +312,14 @@ def check_connection():
 
 def get_database_stats():
     """Get database statistics"""
-    if not db:
+    if db is None:
         return None
     
     try:
         stats = {
-            'users': users_collection.count_documents({}) if users_collection else 0,
-            'teachers': teachers_collection.count_documents({}) if teachers_collection else 0,
-            'conversations': conversations_collection.count_documents({}) if conversations_collection else 0
+            'users': users_collection.count_documents({}) if users_collection is not None else 0,
+            'teachers': teachers_collection.count_documents({}) if teachers_collection is not None else 0,
+            'conversations': conversations_collection.count_documents({}) if conversations_collection is not None else 0
         }
         return stats
     except Exception as e:
