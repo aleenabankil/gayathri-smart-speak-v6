@@ -13,6 +13,15 @@ import atexit
 import signal
 import secrets
 
+# Import database functions
+from database import (
+    create_user, get_user_by_username, get_user_by_id,
+    update_user, update_user_xp, update_user_mode_stats, get_all_users,
+    create_teacher, get_teacher_by_username, get_teacher_by_id, update_teacher,
+    save_conversation, get_conversation, delete_conversation,
+    check_connection, get_database_stats
+)
+
 # ================= SETUP =================
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -21,14 +30,28 @@ app = Flask(__name__)
 # Use environment variable or generate secure random key
 app.secret_key = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(32))
 
-# Separate conversation contexts for each mode
+# Separate conversation contexts for each mode (now using MongoDB)
 conversation_contexts = {}  # Format: {user_id: {'conversation': '', 'roleplay': ''}}
 
-# User database
+# OLD: User database - NOW USING MONGODB (kept for backwards compatibility)
 users_db = {}
 
-# Teacher database (now includes registered teachers)
+# OLD: Teacher database - NOW USING MONGODB (kept for backwards compatibility)
 teachers_db = {}
+
+# Print MongoDB connection status
+print("=" * 60)
+if check_connection():
+    stats = get_database_stats()
+    if stats:
+        print(f"✅ MongoDB Connected!")
+        print(f"📊 Database: {stats['users']} users, {stats['teachers']} teachers")
+    else:
+        print("✅ MongoDB Connected (empty database)")
+else:
+    print("⚠️ MongoDB NOT connected - data will NOT persist!")
+    print("⚠️ Check MONGODB_URI environment variable")
+print("=" * 60)
 
 # Progressive XP requirements
 def get_xp_for_level(level):
@@ -71,22 +94,23 @@ def get_difficulty_for_level(level):
         return "hard"
 
 def save_user_progress(user_id, stars_earned, mode):
-    """Save user progress and update XP"""
-    if user_id in users_db:
-        old_level = users_db[user_id]['level']
-        users_db[user_id]['total_xp'] += stars_earned
-        users_db[user_id]['total_stars'] += stars_earned
-        new_level = calculate_level(users_db[user_id]['total_xp'])
-        users_db[user_id]['level'] = new_level
-        users_db[user_id]['last_active'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Save user progress and update XP using MongoDB"""
+    user = get_user_by_id(user_id)
+    
+    if user:
+        old_level = user.get('level', 1)
+        old_xp = user.get('total_xp', 0)
+        old_stars = user.get('total_stars', 0)
         
-        if mode not in users_db[user_id]['mode_stats']:
-            users_db[user_id]['mode_stats'][mode] = {'stars': 0, 'sessions': 0}
+        new_xp = old_xp + stars_earned
+        new_stars = old_stars + stars_earned
+        new_level = calculate_level(new_xp)
         
-        users_db[user_id]['mode_stats'][mode]['stars'] += stars_earned
-        users_db[user_id]['mode_stats'][mode]['sessions'] += 1
+        # Update user XP and level in MongoDB
+        update_user_xp(user_id, new_xp, new_level, new_stars)
         
-        save_database()
+        # Update mode stats in MongoDB
+        update_user_mode_stats(user_id, mode, stars_earned)
         
         return {
             'leveled_up': new_level > old_level,
@@ -158,16 +182,30 @@ signal.signal(signal.SIGTERM, cleanup_handler)
 signal.signal(signal.SIGINT, cleanup_handler)
 
 def get_user_context(user_id, mode):
-    """Get conversation context for specific user and mode"""
+    """Get conversation context for specific user and mode from MongoDB"""
+    # Try MongoDB first
+    context = get_conversation(user_id, mode)
+    if context:
+        return context
+    
+    # Fallback to in-memory (for migration period)
     if user_id not in conversation_contexts:
         conversation_contexts[user_id] = {'conversation': '', 'roleplay': ''}
     return conversation_contexts[user_id].get(mode, '')
 
 def update_user_context(user_id, mode, context):
-    """Update conversation context for specific user and mode"""
+    """Update conversation context for specific user and mode in MongoDB"""
+    # Keep last 1200 chars
+    context = context[-1200:]
+    
+    # Save to MongoDB
+    save_conversation(user_id, mode, context)
+    
+    # Also update in-memory (for backwards compatibility during migration)
     if user_id not in conversation_contexts:
         conversation_contexts[user_id] = {'conversation': '', 'roleplay': ''}
-    conversation_contexts[user_id][mode] = context[-1200:]  # Keep last 1200 chars
+    conversation_contexts[user_id][mode] = context
+
 
 # ================= TTS =================
 def speak_to_file(text, slow=False):
@@ -941,11 +979,18 @@ def login():
     user_type = data.get("user_type", "student")
     
     if user_type == "teacher":
-        # Teacher login
-        if user_id in teachers_db:
-            if teachers_db[user_id]['password'] == password:
-                session['user_id'] = user_id
+        # Teacher login - search by username
+        teacher = get_teacher_by_username(user_id)  # user_id is actually username for teachers
+        
+        if teacher:
+            if teacher['password'] == password:
+                session['user_id'] = teacher['_id']
                 session['role'] = 'teacher'
+                session['username'] = teacher.get('username', user_id)
+                
+                # Update last active
+                update_teacher(teacher['_id'], {})
+                
                 return jsonify({"success": True, "redirect": "/teacher-dashboard"})
             else:
                 return jsonify({"success": False, "message": "Incorrect password."})
@@ -954,13 +999,17 @@ def login():
     else:
         # Student login
         if user_id and password:
-            if user_id in users_db:
-                if users_db[user_id]['password'] == password:
+            user = get_user_by_id(user_id)
+            
+            if user:
+                if user['password'] == password:
                     session['user_id'] = user_id
                     session['role'] = 'student'
-                    # Update last active on login
-                    users_db[user_id]['last_active'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    save_database()
+                    session['username'] = user.get('username', user.get('name', user_id))
+                    
+                    # Update last active
+                    update_user(user_id, {})
+                    
                     return jsonify({"success": True, "redirect": "/main"})
                 else:
                     return jsonify({"success": False, "message": "Incorrect password."})
@@ -987,20 +1036,25 @@ def signup():
         
         if username and password and name:
             if len(username) == 6 and len(password) == 6:
-                # Check if username already exists
-                if username in teachers_db:
+                # Check if username already exists in MongoDB
+                existing_teacher = get_teacher_by_username(username)
+                if existing_teacher:
                     return jsonify({"success": False, "message": "Username already exists. Please choose another."})
                 else:
-                    teachers_db[username] = {
-                        "password": password,
-                        "name": name,
-                        "role": "teacher",
-                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    save_database()
-                    session['user_id'] = username
-                    session['role'] = 'teacher'
-                    return jsonify({"success": True, "redirect": "/teacher-dashboard"})
+                    # Create teacher in MongoDB
+                    teacher_id = f"teacher_{username}"
+                    teacher = create_teacher(teacher_id, username, password)
+                    
+                    if teacher:
+                        # Also save name in update
+                        update_teacher(teacher_id, {'name': name})
+                        
+                        session['user_id'] = teacher_id
+                        session['role'] = 'teacher'
+                        session['username'] = username
+                        return jsonify({"success": True, "redirect": "/teacher-dashboard"})
+                    else:
+                        return jsonify({"success": False, "message": "Error creating teacher account. Please try again."})
             else:
                 return jsonify({"success": False, "message": "Username and Password must be exactly 6 characters each."})
         else:
@@ -1014,28 +1068,31 @@ def signup():
         division = data.get("division")
         
         if user_id and password and name and student_class and division:
-            if len(user_id) == 4 and user_id.isdigit():  # UPDATED: Changed from 3 to 4
-                if user_id in users_db:
+            if len(user_id) == 4 and user_id.isdigit():
+                # Check if user already exists in MongoDB
+                existing_user = get_user_by_id(user_id)
+                if existing_user:
                     return jsonify({"success": False, "message": "User ID already exists. Please login or choose a different ID."})
                 else:
-                    users_db[user_id] = {
-                        "password": password,
-                        "name": name,
-                        "class": student_class,
-                        "division": division,
-                        "total_xp": 0,
-                        "total_stars": 0,
-                        "level": 1,
-                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "last_active": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "mode_stats": {}
-                    }
-                    save_database()  # Save immediately after signup
-                    session['user_id'] = user_id
-                    session['role'] = 'student'
-                    return jsonify({"success": True, "redirect": "/main"})
+                    # Create user in MongoDB
+                    user = create_user(user_id, name, password, user_type='student')
+                    
+                    if user:
+                        # Update with additional info
+                        update_user(user_id, {
+                            'class': student_class,
+                            'division': division,
+                            'name': name
+                        })
+                        
+                        session['user_id'] = user_id
+                        session['role'] = 'student'
+                        session['username'] = name
+                        return jsonify({"success": True, "redirect": "/main"})
+                    else:
+                        return jsonify({"success": False, "message": "Error creating account. Please try again."})
             else:
-                return jsonify({"success": False, "message": "User ID must be exactly 4 digits."})  # UPDATED: Changed message
+                return jsonify({"success": False, "message": "User ID must be exactly 4 digits."})
         else:
             return jsonify({"success": False, "message": "Please fill in all fields."})
 
@@ -1045,7 +1102,7 @@ def main():
         return redirect(url_for('home'))
     
     user_id = session['user_id']
-    user_data = users_db.get(user_id, {})
+    user_data = get_user_by_id(user_id) or {}
     
     recommended_difficulty = get_difficulty_for_level(user_data.get('level', 1))
     
@@ -1069,7 +1126,7 @@ def profile():
         return redirect(url_for('home'))
     
     user_id = session['user_id']
-    user_data = users_db.get(user_id, {})
+    user_data = get_user_by_id(user_id) or {}
     
     current_level = user_data.get('level', 1)
     current_xp = user_data.get('total_xp', 0)
@@ -1089,18 +1146,25 @@ def teacher_dashboard():
     if 'user_id' not in session or session.get('role') != 'teacher':
         return redirect(url_for('home'))
     
+    # Get all users from MongoDB
+    all_users = get_all_users()
+    
     # Get all unique classes and divisions
     all_classes = set()
     all_divisions = set()
     
-    for user_id, user_data in users_db.items():
-        all_classes.add(user_data['class'])
-        all_divisions.add(user_data['division'])
+    for user in all_users:
+        if 'class' in user:
+            all_classes.add(user['class'])
+        if 'division' in user:
+            all_divisions.add(user['division'])
     
-    all_classes = sorted(list(all_classes), key=lambda x: int(x))
+    all_classes = sorted(list(all_classes), key=lambda x: int(x) if x.isdigit() else 0)
     all_divisions = sorted(list(all_divisions))
     
-    teacher_name = teachers_db[session['user_id']]['name']
+    # Get teacher info from MongoDB
+    teacher = get_teacher_by_id(session['user_id'])
+    teacher_name = teacher.get('name', 'Teacher') if teacher else 'Teacher'
     
     return render_template("teacher_dashboard.html",
                          teacher_name=teacher_name,
@@ -1117,16 +1181,19 @@ def get_class_students():
     selected_class = data.get("class")
     selected_division = data.get("division")
     
+    # Get all users from MongoDB
+    all_users = get_all_users()
+    
     students = []
-    for user_id, user_data in users_db.items():
-        if user_data['class'] == selected_class and user_data['division'] == selected_division:
+    for user in all_users:
+        if user.get('class') == selected_class and user.get('division') == selected_division:
             students.append({
-                'user_id': user_id,
-                'name': user_data['name'],
-                'level': user_data['level'],
-                'total_xp': user_data['total_xp'],
-                'total_stars': user_data['total_stars'],
-                'last_active': user_data['last_active']
+                'user_id': user.get('_id'),
+                'name': user.get('name', user.get('username', 'Unknown')),
+                'level': user.get('level', 1),
+                'total_xp': user.get('total_xp', 0),
+                'total_stars': user.get('total_stars', 0),
+                'last_active': user.get('last_active', 'Never')
             })
     
     # Sort by total XP (highest first)
